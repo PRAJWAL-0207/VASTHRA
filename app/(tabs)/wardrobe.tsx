@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -12,7 +12,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { BrandHeader } from '../../components/BrandHeader';
@@ -31,8 +31,10 @@ import {
 } from '../../constants/colors';
 import { BorderRadius, Colors, Shadows, Spacing } from '../../constants/theme';
 import {
-  captureImageWithCamera,
-  pickImageFromGallery,
+  capturePhoto,
+  confirmAction,
+  pickImage,
+  resolveImageUri,
 } from '../../services/imageStorage';
 import {
   addWardrobeItem,
@@ -84,6 +86,7 @@ export default function WardrobeScreen() {
 
   // Photo Source Picker Sheet Modal
   const [isPhotoSheetOpen, setIsPhotoSheetOpen] = useState(false);
+  const [photoTargetContext, setPhotoTargetContext] = useState<'form' | 'detail'>('form');
 
   // Item Details View Modal
   const [selectedDetailItem, setSelectedDetailItem] = useState<WardrobeItem | null>(null);
@@ -97,9 +100,12 @@ export default function WardrobeScreen() {
     }
   };
 
-  useEffect(() => {
-    loadWardrobe();
-  }, []);
+  // Automatically refresh when screen receives focus
+  useFocusEffect(
+    useCallback(() => {
+      loadWardrobe();
+    }, [])
+  );
 
   const openAddModal = () => {
     setEditingItem(null);
@@ -144,17 +150,37 @@ export default function WardrobeScreen() {
 
   const handlePickFromGallery = async () => {
     setIsPhotoSheetOpen(false);
-    const uri = await pickImageFromGallery([1, 1]);
+    const uri = await pickImage([1, 1]);
     if (uri) {
-      setItemImageUri(uri);
+      if (photoTargetContext === 'detail' && selectedDetailItem) {
+        // Direct replacement from detail modal
+        const updated = await updateWardrobeItem({
+          ...selectedDetailItem,
+          imageUri: uri,
+        });
+        setSelectedDetailItem(updated);
+        setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+      } else {
+        setItemImageUri(uri);
+      }
     }
   };
 
   const handleCaptureFromCamera = async () => {
     setIsPhotoSheetOpen(false);
-    const uri = await captureImageWithCamera([1, 1]);
+    const uri = await capturePhoto([1, 1]);
     if (uri) {
-      setItemImageUri(uri);
+      if (photoTargetContext === 'detail' && selectedDetailItem) {
+        // Direct replacement from detail modal
+        const updated = await updateWardrobeItem({
+          ...selectedDetailItem,
+          imageUri: uri,
+        });
+        setSelectedDetailItem(updated);
+        setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+      } else {
+        setItemImageUri(uri);
+      }
     }
   };
 
@@ -174,8 +200,7 @@ export default function WardrobeScreen() {
 
     try {
       if (editingItem) {
-        // Update existing item
-        const updated: WardrobeItem = {
+        const updated = await updateWardrobeItem({
           ...editingItem,
           name: itemName.trim(),
           category: itemCategory,
@@ -188,11 +213,9 @@ export default function WardrobeScreen() {
           occasion: itemOccasion,
           notes: itemNotes.trim() || undefined,
           imageUri: itemImageUri,
-        };
-        await updateWardrobeItem(updated);
-        setItems(items.map((i) => (i.id === updated.id ? updated : i)));
+        });
+        setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
       } else {
-        // Add new item
         const newItem = await addWardrobeItem({
           name: itemName.trim(),
           category: itemCategory,
@@ -206,39 +229,34 @@ export default function WardrobeScreen() {
           notes: itemNotes.trim() || undefined,
           imageUri: itemImageUri,
         });
-        setItems([newItem, ...items]);
+        setItems((prev) => [newItem, ...prev]);
       }
 
       setIsModalOpen(false);
     } catch (err) {
-      Alert.alert('Storage Error', 'Could not save clothing item. Please try again.');
+      Alert.alert('Storage Error', 'Could not save clothing item. Please check storage permissions.');
       console.warn('Save error:', err);
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleDeleteItem = async (id: string, name: string) => {
-    Alert.alert(
+  const handleDeleteItem = (id: string, name: string) => {
+    confirmAction(
       'Remove Garment',
-      `Are you sure you want to remove "${name}" from your digital wardrobe?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-            } catch {}
-            await deleteWardrobeItem(id);
-            setItems(items.filter((i) => i.id !== id));
-            if (selectedDetailItem?.id === id) {
-              setSelectedDetailItem(null);
-            }
-          },
-        },
-      ]
+      `Are you sure you want to permanently remove "${name}" from your digital wardrobe?`,
+      async () => {
+        try {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        } catch {}
+        await deleteWardrobeItem(id);
+        setItems((prev) => prev.filter((i) => i.id !== id));
+        if (selectedDetailItem?.id === id) {
+          setSelectedDetailItem(null);
+        }
+      },
+      'Remove',
+      true
     );
   };
 
@@ -423,7 +441,7 @@ export default function WardrobeScreen() {
             <View style={styles.imagePickerSection}>
               <View style={styles.imageFrame}>
                 <Image
-                  source={{ uri: itemImageUri }}
+                  source={{ uri: resolveImageUri(itemImageUri) }}
                   style={styles.previewImage}
                   resizeMode="cover"
                 />
@@ -435,7 +453,10 @@ export default function WardrobeScreen() {
               <View style={styles.photoButtonsRow}>
                 <TouchableOpacity
                   activeOpacity={0.8}
-                  onPress={() => setIsPhotoSheetOpen(true)}
+                  onPress={() => {
+                    setPhotoTargetContext('form');
+                    setIsPhotoSheetOpen(true);
+                  }}
                   style={styles.changeImageBtn}
                 >
                   <Ionicons name="camera-reverse-outline" size={17} color="#FFFFFF" />
@@ -485,7 +506,6 @@ export default function WardrobeScreen() {
                       key={cat}
                       onPress={() => {
                         setItemCategory(cat);
-                        // If current photo is still a default sample, update to sample of new category
                         if (Object.values(SAMPLE_GARMENT_PHOTOS).includes(itemImageUri)) {
                           setItemImageUri(SAMPLE_GARMENT_PHOTOS[cat] || SAMPLE_GARMENT_PHOTOS['Shirts']);
                         }
@@ -753,7 +773,7 @@ export default function WardrobeScreen() {
               <>
                 <View style={styles.detailImageWrap}>
                   <Image
-                    source={{ uri: selectedDetailItem.imageUri }}
+                    source={{ uri: resolveImageUri(selectedDetailItem.imageUri) }}
                     style={styles.detailImage}
                     resizeMode="cover"
                   />
@@ -846,10 +866,21 @@ export default function WardrobeScreen() {
                     </TouchableOpacity>
 
                     <TouchableOpacity
+                      style={styles.detailReplaceBtn}
+                      onPress={() => {
+                        setPhotoTargetContext('detail');
+                        setIsPhotoSheetOpen(true);
+                      }}
+                    >
+                      <Ionicons name="camera-reverse-outline" size={16} color={Colors.primaryGold} />
+                      <Text style={styles.detailReplaceText}>Photo</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
                       style={styles.detailEditBtn}
                       onPress={() => openEditModal(selectedDetailItem)}
                     >
-                      <Ionicons name="pencil-outline" size={17} color={Colors.primary} />
+                      <Ionicons name="pencil-outline" size={16} color={Colors.primary} />
                       <Text style={styles.detailEditText}>Edit</Text>
                     </TouchableOpacity>
 
@@ -859,7 +890,7 @@ export default function WardrobeScreen() {
                         handleDeleteItem(selectedDetailItem.id, selectedDetailItem.name)
                       }
                     >
-                      <Ionicons name="trash-outline" size={17} color={Colors.scorePoor} />
+                      <Ionicons name="trash-outline" size={16} color={Colors.scorePoor} />
                     </TouchableOpacity>
                   </View>
                 </ScrollView>
@@ -1426,11 +1457,27 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 13,
   },
+  detailReplaceBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surfaceElevated,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
+    gap: 4,
+  },
+  detailReplaceText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: Colors.primaryGold,
+  },
   detailEditBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Colors.surfaceElevated,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingVertical: 10,
     borderRadius: BorderRadius.md,
     borderWidth: 1,
@@ -1438,7 +1485,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   detailEditText: {
-    fontSize: 13,
+    fontSize: 12.5,
     fontWeight: '700',
     color: Colors.primary,
   },

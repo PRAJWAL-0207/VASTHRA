@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { OutfitSuggestion, PersonalPhoto, UserProfile, WardrobeItem } from '../types';
-import { deletePersistentImage, savePersistentImage } from './imageStorage';
+import { deleteImage, replaceImage, resolveImageUri, saveImage } from './imageStorage';
 
 const STORAGE_KEYS = {
   USER_PROFILE: '@vasthra_user_profile',
@@ -156,16 +156,32 @@ export const INITIAL_SAVED_OUTFITS: OutfitSuggestion[] = [
   },
 ];
 
-// Profile storage operations
+// Helper to resolve an item's image URL for rendering
+function resolveItemImages<T extends { imageUri: string }>(item: T): T {
+  return {
+    ...item,
+    imageUri: resolveImageUri(item.imageUri),
+  };
+}
+
+// ============================================================================
+// PROFILE STORAGE OPERATIONS
+// ============================================================================
 export async function getUserProfile(): Promise<UserProfile> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEYS.USER_PROFILE);
     if (!raw) return DEFAULT_USER_PROFILE;
     const parsed = JSON.parse(raw);
+    const resolvedPhotos = (parsed.photos || []).map((p: PersonalPhoto) => ({
+      ...p,
+      uri: resolveImageUri(p.uri),
+    }));
+
     return {
       ...DEFAULT_USER_PROFILE,
       ...parsed,
-      photos: parsed.photos || [],
+      photos: resolvedPhotos,
+      avatarUrl: resolveImageUri(parsed.avatarUrl),
     };
   } catch {
     return DEFAULT_USER_PROFILE;
@@ -176,10 +192,12 @@ export async function saveUserProfile(profile: UserProfile): Promise<void> {
   await AsyncStorage.setItem(STORAGE_KEYS.USER_PROFILE, JSON.stringify(profile));
 }
 
-// Personal style photo operations
+// ============================================================================
+// PERSONAL STYLE PHOTO VAULT OPERATIONS
+// ============================================================================
 export async function addPersonalPhoto(photo: Omit<PersonalPhoto, 'id' | 'createdAt'>): Promise<PersonalPhoto> {
   const profile = await getUserProfile();
-  const persistentUri = await savePersistentImage(photo.uri, `user_${photo.type}`);
+  const canonicalUri = await saveImage(photo.uri, `user_${photo.type}`);
 
   const isFirstPhoto = !profile.photos || profile.photos.length === 0;
   const isPrimary = photo.isPrimary ?? isFirstPhoto;
@@ -187,7 +205,7 @@ export async function addPersonalPhoto(photo: Omit<PersonalPhoto, 'id' | 'create
   const newPhoto: PersonalPhoto = {
     ...photo,
     id: `photo-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    uri: persistentUri,
+    uri: canonicalUri,
     isPrimary,
     createdAt: Date.now(),
   };
@@ -200,24 +218,27 @@ export async function addPersonalPhoto(photo: Omit<PersonalPhoto, 'id' | 'create
   const updatedProfile: UserProfile = {
     ...profile,
     photos: updatedPhotos,
-    avatarUrl: isPrimary ? persistentUri : profile.avatarUrl,
+    avatarUrl: isPrimary ? canonicalUri : profile.avatarUrl,
   };
 
   await saveUserProfile(updatedProfile);
-  return newPhoto;
+
+  return {
+    ...newPhoto,
+    uri: resolveImageUri(canonicalUri),
+  };
 }
 
 export async function deletePersonalPhoto(photoId: string): Promise<void> {
   const profile = await getUserProfile();
   const target = (profile.photos || []).find((p) => p.id === photoId);
   if (target) {
-    await deletePersistentImage(target.uri);
+    await deleteImage(target.uri);
   }
 
   const updatedPhotos = (profile.photos || []).filter((p) => p.id !== photoId);
   let newAvatarUrl = profile.avatarUrl;
 
-  // If deleted photo was primary, assign next available photo as primary
   if (target?.isPrimary && updatedPhotos.length > 0) {
     updatedPhotos[0].isPrimary = true;
     newAvatarUrl = updatedPhotos[0].uri;
@@ -255,20 +276,16 @@ export async function setPrimaryPersonalPhoto(photoId: string): Promise<void> {
   await saveUserProfile(updatedProfile);
 }
 
-export async function replacePersonalPhoto(photoId: string, newTempUri: string): Promise<PersonalPhoto | null> {
+export async function replacePersonalPhoto(photoId: string, newSourceUri: string): Promise<PersonalPhoto | null> {
   const profile = await getUserProfile();
   const currentPhoto = (profile.photos || []).find((p) => p.id === photoId);
   if (!currentPhoto) return null;
 
-  // Save new persistent image
-  const persistentUri = await savePersistentImage(newTempUri, `user_${currentPhoto.type}`);
-
-  // Delete previous local file
-  await deletePersistentImage(currentPhoto.uri);
+  const newCanonicalUri = await replaceImage(currentPhoto.uri, newSourceUri, `user_${currentPhoto.type}`);
 
   const updatedPhotos = (profile.photos || []).map((p) => {
     if (p.id === photoId) {
-      return { ...p, uri: persistentUri };
+      return { ...p, uri: newCanonicalUri };
     }
     return p;
   });
@@ -276,70 +293,76 @@ export async function replacePersonalPhoto(photoId: string, newTempUri: string):
   const updatedProfile: UserProfile = {
     ...profile,
     photos: updatedPhotos,
-    avatarUrl: currentPhoto.isPrimary ? persistentUri : profile.avatarUrl,
+    avatarUrl: currentPhoto.isPrimary ? newCanonicalUri : profile.avatarUrl,
   };
 
   await saveUserProfile(updatedProfile);
-  return { ...currentPhoto, uri: persistentUri };
+  return { ...currentPhoto, uri: resolveImageUri(newCanonicalUri) };
 }
 
-// Wardrobe storage operations
+// ============================================================================
+// DIGITAL WARDROBE STORAGE OPERATIONS
+// ============================================================================
 export async function getWardrobeItems(): Promise<WardrobeItem[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEYS.WARDROBE_ITEMS);
     if (!raw) {
       await AsyncStorage.setItem(STORAGE_KEYS.WARDROBE_ITEMS, JSON.stringify(INITIAL_WARDROBE_ITEMS));
-      return INITIAL_WARDROBE_ITEMS;
+      return INITIAL_WARDROBE_ITEMS.map(resolveItemImages);
     }
-    return JSON.parse(raw);
+    const parsed: WardrobeItem[] = JSON.parse(raw);
+    return parsed.map(resolveItemImages);
   } catch {
-    return INITIAL_WARDROBE_ITEMS;
+    return INITIAL_WARDROBE_ITEMS.map(resolveItemImages);
   }
 }
 
 export async function addWardrobeItem(item: Omit<WardrobeItem, 'id' | 'createdAt'>): Promise<WardrobeItem> {
   const current = await getWardrobeItems();
-  // Ensure image is permanently stored
-  const persistentUri = await savePersistentImage(item.imageUri, 'garment');
+  const canonicalUri = await saveImage(item.imageUri, 'garment');
 
   const newItem: WardrobeItem = {
     ...item,
-    imageUri: persistentUri,
+    imageUri: canonicalUri,
     id: `wardrobe-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     createdAt: Date.now(),
   };
+
   const updated = [newItem, ...current];
   await AsyncStorage.setItem(STORAGE_KEYS.WARDROBE_ITEMS, JSON.stringify(updated));
-  return newItem;
+
+  return resolveItemImages(newItem);
 }
 
-export async function updateWardrobeItem(item: WardrobeItem): Promise<void> {
+export async function updateWardrobeItem(item: WardrobeItem): Promise<WardrobeItem> {
   const current = await getWardrobeItems();
   const existing = current.find((i) => i.id === item.id);
 
-  let finalImageUri = item.imageUri;
-  // If image was replaced with a new temporary file, persist it and cleanup old
+  let finalCanonicalUri = item.imageUri;
   if (existing && existing.imageUri !== item.imageUri) {
-    finalImageUri = await savePersistentImage(item.imageUri, 'garment');
-    await deletePersistentImage(existing.imageUri);
+    finalCanonicalUri = await replaceImage(existing.imageUri, item.imageUri, 'garment');
   }
 
-  const updatedItem = { ...item, imageUri: finalImageUri };
+  const updatedItem: WardrobeItem = { ...item, imageUri: finalCanonicalUri };
   const updated = current.map((i) => (i.id === item.id ? updatedItem : i));
   await AsyncStorage.setItem(STORAGE_KEYS.WARDROBE_ITEMS, JSON.stringify(updated));
+
+  return resolveItemImages(updatedItem);
 }
 
 export async function deleteWardrobeItem(id: string): Promise<void> {
   const current = await getWardrobeItems();
   const target = current.find((i) => i.id === id);
   if (target) {
-    await deletePersistentImage(target.imageUri);
+    await deleteImage(target.imageUri);
   }
   const updated = current.filter((i) => i.id !== id);
   await AsyncStorage.setItem(STORAGE_KEYS.WARDROBE_ITEMS, JSON.stringify(updated));
 }
 
-// Saved outfits storage operations
+// ============================================================================
+// SAVED OUTFITS STORAGE OPERATIONS
+// ============================================================================
 export async function getSavedOutfits(): Promise<OutfitSuggestion[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEYS.SAVED_OUTFITS);
@@ -347,7 +370,15 @@ export async function getSavedOutfits(): Promise<OutfitSuggestion[]> {
       await AsyncStorage.setItem(STORAGE_KEYS.SAVED_OUTFITS, JSON.stringify(INITIAL_SAVED_OUTFITS));
       return INITIAL_SAVED_OUTFITS;
     }
-    return JSON.parse(raw);
+    const parsed: OutfitSuggestion[] = JSON.parse(raw);
+    return parsed.map((outfit) => ({
+      ...outfit,
+      imageUrl: resolveImageUri(outfit.imageUrl),
+      pieces: outfit.pieces.map((p) => ({
+        ...p,
+        imageUri: p.imageUri ? resolveImageUri(p.imageUri) : undefined,
+      })),
+    }));
   } catch {
     return INITIAL_SAVED_OUTFITS;
   }

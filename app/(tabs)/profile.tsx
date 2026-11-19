@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Image,
@@ -11,7 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { BrandHeader } from '../../components/BrandHeader';
@@ -21,6 +21,7 @@ import { FASHION_COLORS, STYLES } from '../../constants/colors';
 import { BorderRadius, Colors, Shadows, Spacing } from '../../constants/theme';
 import {
   captureImageWithCamera,
+  confirmAction,
   pickImageFromGallery,
 } from '../../services/imageStorage';
 import {
@@ -80,6 +81,7 @@ export default function ProfileScreen() {
   const [isUploadSheetOpen, setIsUploadSheetOpen] = useState(false);
   const [uploadPhotoType, setUploadPhotoType] = useState<PersonalPhotoType>('face');
   const [previewPhoto, setPreviewPhoto] = useState<PersonalPhoto | null>(null);
+  const [replaceTargetPhoto, setReplaceTargetPhoto] = useState<PersonalPhoto | null>(null);
 
   const loadProfileData = async () => {
     const p = await getUserProfile();
@@ -93,9 +95,11 @@ export default function ProfileScreen() {
     setWardrobeCount(items.length);
   };
 
-  useEffect(() => {
-    loadProfileData();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      loadProfileData();
+    }, [])
+  );
 
   const toggleColor = (id: string) => {
     try {
@@ -205,68 +209,71 @@ export default function ProfileScreen() {
     }
   };
 
-  const handleDeletePhoto = async (photo: PersonalPhoto) => {
-    Alert.alert(
+  const handleDeletePhoto = (photo: PersonalPhoto) => {
+    confirmAction(
       'Delete Photo',
-      `Are you sure you want to delete your ${photo.label}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              await deletePersonalPhoto(photo.id);
-              if (previewPhoto?.id === photo.id) {
-                setPreviewPhoto(null);
-              }
-              await loadProfileData();
-            } catch (e) {
-              console.warn('Delete photo err:', e);
-            }
-          },
-        },
-      ]
+      `Are you sure you want to permanently delete your ${photo.label}?`,
+      async () => {
+        try {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          await deletePersonalPhoto(photo.id);
+          if (previewPhoto?.id === photo.id) {
+            setPreviewPhoto(null);
+          }
+          await loadProfileData();
+        } catch (e) {
+          console.warn('Delete photo err:', e);
+        }
+      },
+      'Delete',
+      true
     );
   };
 
-  const handleReplacePhoto = async (photo: PersonalPhoto) => {
-    Alert.alert(
-      'Replace Photo',
-      `Choose how you would like to replace your ${photo.label}:`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Take Photo',
-          onPress: async () => {
-            const aspect = PHOTO_TYPE_CONFIG[photo.type].aspect;
-            const uri = await captureImageWithCamera(aspect);
-            if (uri) {
-              await replacePersonalPhoto(photo.id, uri);
-              await loadProfileData();
-              if (previewPhoto?.id === photo.id) {
-                setPreviewPhoto(null);
-              }
-            }
-          },
-        },
-        {
-          text: 'Choose from Gallery',
-          onPress: async () => {
-            const aspect = PHOTO_TYPE_CONFIG[photo.type].aspect;
-            const uri = await pickImageFromGallery(aspect);
-            if (uri) {
-              await replacePersonalPhoto(photo.id, uri);
-              await loadProfileData();
-              if (previewPhoto?.id === photo.id) {
-                setPreviewPhoto(null);
-              }
-            }
-          },
-        },
-      ]
-    );
+  const handleReplacePhoto = (photo: PersonalPhoto) => {
+    setReplaceTargetPhoto(photo);
+  };
+
+  const handleExecuteReplaceWithCamera = async () => {
+    if (!replaceTargetPhoto) return;
+    const target = replaceTargetPhoto;
+    setReplaceTargetPhoto(null);
+    const aspect = PHOTO_TYPE_CONFIG[target.type].aspect;
+    const uri = await captureImageWithCamera(aspect);
+    if (uri) {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        await replacePersonalPhoto(target.id, uri);
+        await loadProfileData();
+        if (previewPhoto?.id === target.id) {
+          setPreviewPhoto(null);
+        }
+      } catch (e) {
+        console.warn('Replace error:', e);
+        Alert.alert('Replace Error', 'Could not replace photo.');
+      }
+    }
+  };
+
+  const handleExecuteReplaceWithGallery = async () => {
+    if (!replaceTargetPhoto) return;
+    const target = replaceTargetPhoto;
+    setReplaceTargetPhoto(null);
+    const aspect = PHOTO_TYPE_CONFIG[target.type].aspect;
+    const uri = await pickImageFromGallery(aspect);
+    if (uri) {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        await replacePersonalPhoto(target.id, uri);
+        await loadProfileData();
+        if (previewPhoto?.id === target.id) {
+          setPreviewPhoto(null);
+        }
+      } catch (e) {
+        console.warn('Replace error:', e);
+        Alert.alert('Replace Error', 'Could not replace photo.');
+      }
+    }
   };
 
   // Find photos by category
@@ -739,6 +746,63 @@ export default function ProfileScreen() {
             <TouchableOpacity
               style={styles.sheetCancelBtn}
               onPress={() => setIsUploadSheetOpen(false)}
+            >
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* PHOTO REPLACE ACTION SHEET MODAL */}
+      <Modal
+        visible={!!replaceTargetPhoto}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReplaceTargetPhoto(null)}
+      >
+        <TouchableOpacity
+          style={styles.sheetOverlay}
+          activeOpacity={1}
+          onPress={() => setReplaceTargetPhoto(null)}
+        >
+          <View style={styles.sheetContainer}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>
+              Replace {replaceTargetPhoto?.label}
+            </Text>
+            <Text style={styles.sheetSubtitle}>
+              Select new photograph to replace this style reference
+            </Text>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={handleExecuteReplaceWithCamera}
+            >
+              <View style={styles.sheetOptionIconWrap}>
+                <Ionicons name="camera" size={20} color={Colors.primary} />
+              </View>
+              <View style={styles.sheetOptionTextWrap}>
+                <Text style={styles.sheetOptionTitle}>Take Photo with Camera</Text>
+                <Text style={styles.sheetOptionDesc}>Capture new portrait or silhouette</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={handleExecuteReplaceWithGallery}
+            >
+              <View style={styles.sheetOptionIconWrap}>
+                <Ionicons name="images" size={20} color={Colors.primaryGold} />
+              </View>
+              <View style={styles.sheetOptionTextWrap}>
+                <Text style={styles.sheetOptionTitle}>Choose from Photo Library</Text>
+                <Text style={styles.sheetOptionDesc}>Select an existing image from your gallery</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetCancelBtn}
+              onPress={() => setReplaceTargetPhoto(null)}
             >
               <Text style={styles.sheetCancelText}>Cancel</Text>
             </TouchableOpacity>
